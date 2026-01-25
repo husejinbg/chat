@@ -13,3 +13,4 @@ HISTORY_DIR = Path("history")
 ACTIVE_CHAT_FILE = HISTORY_DIR / "active_chat.json"
 INPUT_FILE = Path("input.txt")
 OUTPUT_FILE = Path("output.md")
+STREAMING = True

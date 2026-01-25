@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import requests
 
-from config import API_KEY, API_URL, MODEL, MAX_TOKENS, HISTORY_DIR, ACTIVE_CHAT_FILE, INPUT_FILE, OUTPUT_FILE
+from config import API_KEY, API_URL, MODEL, MAX_TOKENS, HISTORY_DIR, ACTIVE_CHAT_FILE, INPUT_FILE, OUTPUT_FILE, STREAMING
 
 # Ensure history directory exists
 HISTORY_DIR.mkdir(exist_ok=True)
@@ -89,25 +89,68 @@ class Chat:
         with open(ACTIVE_CHAT_FILE, 'w', encoding='utf-8') as f:
             json.dump({"active_chat": filename}, f, indent=2)
     
-    def send_message(self, messages: List[Dict]) -> Dict:
+    def send_message(self, messages: List[Dict], stream: bool = False) -> Dict:
         """Send messages to AI API and get response"""
         payload = {
             "model": MODEL,
             "messages": messages,
-            "max_tokens": MAX_TOKENS
+            "max_tokens": MAX_TOKENS,
+            "stream": stream
         }
-        
+
         try:
             response = requests.post(
                 API_URL,
                 headers=self.headers,
                 json=payload,
-                timeout=60
+                timeout=120,
+                stream=stream
             )
             response.raise_for_status()
+
+            if stream:
+                return self._handle_stream(response)
             return response.json()
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"API request failed: {e}")
+
+    def _handle_stream(self, response) -> Dict:
+        """Handle streaming response from API"""
+        full_content = ""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        print("\n" + "="*60)
+        print("ASSISTANT:")
+        print("="*60)
+
+        for line in response.iter_lines():
+            if line:
+                line = line.decode('utf-8')
+                if line.startswith("data: "):
+                    data = line[6:]  # Remove "data: " prefix
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        if "choices" in chunk and chunk["choices"]:
+                            delta = chunk["choices"][0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                print(content, end="", flush=True)
+                                full_content += content
+                        # Capture usage if present (usually in final chunk)
+                        if "usage" in chunk and chunk["usage"]:
+                            usage = chunk["usage"]
+                    except json.JSONDecodeError:
+                        continue
+
+        print("\n" + "="*60)
+
+        # Return in same format as non-streaming response
+        return {
+            "choices": [{"message": {"content": full_content}}],
+            "usage": usage
+        }
     
     def update_output_md(self, chat_data: Dict):
         """Update output.md with full chat history"""
@@ -180,26 +223,26 @@ class Chat:
         
         # Send to API
         print("Sending message to AI...")
-        response = self.send_message(chat_data["messages"])
-        
+        response = self.send_message(chat_data["messages"], stream=STREAMING)
+
         # Extract assistant response
         assistant_message = response["choices"][0]["message"]["content"]
-        
+
         # Add assistant response to chat
         chat_data["messages"].append({
             "role": "assistant",
             "content": assistant_message
         })
-        
+
         # Update usage statistics (cumulative)
         response_usage = response["usage"]
         chat_data["usage"]["prompt_tokens"] += response_usage["prompt_tokens"]
         chat_data["usage"]["completion_tokens"] += response_usage["completion_tokens"]
         chat_data["usage"]["total_tokens"] += response_usage["total_tokens"]
-        
+
         # Update timestamp
         chat_data["last_updated_at"] = datetime.now().isoformat()
-        
+
         # Save chat history
         if filename is None:
             filename = self.save_chat_history(chat_data)
@@ -207,20 +250,21 @@ class Chat:
         else:
             self.save_chat_history(chat_data, filename)
             print(f"Updated chat: {filename}")
-        
+
         # Set as active chat
         self.set_active_chat(filename)
-        
+
         # Update output.md
         self.update_output_md(chat_data)
         print(f"\nResponse written to {OUTPUT_FILE}")
-        
-        # Print response to console
-        print("\n" + "="*60)
-        print("ASSISTANT:")
-        print("="*60)
-        print(assistant_message)
-        print("="*60)
+
+        # Print response to console (only if not streaming, as streaming prints in real-time)
+        if not STREAMING:
+            print("\n" + "="*60)
+            print("ASSISTANT:")
+            print("="*60)
+            print(assistant_message)
+            print("="*60)
 
 
 def main():
